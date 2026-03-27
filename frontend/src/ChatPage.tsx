@@ -1,5 +1,24 @@
 import React, { useState, useEffect, useRef } from "react";
 
+/** Minimal markdown → HTML for LLM responses (bold, italic, lists, line breaks). */
+function renderMarkdown(text: string): string {
+  return text
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    .replace(/`([^`]+)`/g, "<code style='background:#f0f0f0;padding:1px 4px;border-radius:3px;font-size:12px'>$1</code>")
+    .replace(/((?:^\d+\. .+\n?)+)/gm, (block) => {
+      const items = block.trim().split("\n").map(l => `<li>${l.replace(/^\d+\. /, "")}</li>`).join("");
+      return `<ol style='margin:4px 0;padding-left:18px'>${items}</ol>`;
+    })
+    .replace(/((?:^[-*] .+\n?)+)/gm, (block) => {
+      const items = block.trim().split("\n").map(l => `<li>${l.replace(/^[-*] /, "")}</li>`).join("");
+      return `<ul style='margin:4px 0;padding-left:18px'>${items}</ul>`;
+    })
+    .replace(/\n/g, "<br/>");
+}
+
 interface PageContext {
   page?: string;
   datasource?: string | null;
@@ -140,7 +159,11 @@ export default function ChatPage() {
             style={msg.role === "user" ? styles.userBubble : styles.assistantBubble}
           >
             <strong>{msg.role === "user" ? "You" : "Assistant"}</strong>
-            <p style={{ margin: "4px 0 0" }}>{msg.content}</p>
+            {msg.role === "assistant" ? (
+              <p style={{ margin: "4px 0 0" }} dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
+            ) : (
+              <p style={{ margin: "4px 0 0" }}>{msg.content}</p>
+            )}
             {"actions" in msg &&
               msg.actions?.map((action, aIdx) => (
                 <div key={aIdx} style={styles.actionCard}>

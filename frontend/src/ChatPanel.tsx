@@ -1,5 +1,30 @@
 import React, { useState } from "react";
 
+/** Minimal markdown → HTML for LLM responses (bold, italic, lists, line breaks). */
+function renderMarkdown(text: string): string {
+  return text
+    // Escape HTML entities first to prevent XSS
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    // Bold and italic
+    .replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    // Inline code
+    .replace(/`([^`]+)`/g, "<code style='background:#f0f0f0;padding:1px 4px;border-radius:3px;font-size:12px'>$1</code>")
+    // Numbered lists: collect consecutive lines starting with "N. "
+    .replace(/((?:^\d+\. .+\n?)+)/gm, (block) => {
+      const items = block.trim().split("\n").map(l => `<li>${l.replace(/^\d+\. /, "")}</li>`).join("");
+      return `<ol style='margin:4px 0;padding-left:18px'>${items}</ol>`;
+    })
+    // Bullet lists
+    .replace(/((?:^[-*] .+\n?)+)/gm, (block) => {
+      const items = block.trim().split("\n").map(l => `<li>${l.replace(/^[-*] /, "")}</li>`).join("");
+      return `<ul style='margin:4px 0;padding-left:18px'>${items}</ul>`;
+    })
+    // Line breaks
+    .replace(/\n/g, "<br/>");
+}
+
 interface ChatPanelProps {
   /** Superset dataset ID to scope the conversation. Passed by Explore view. */
   datasetId?: number;
@@ -119,7 +144,11 @@ export default function ChatPanel({ datasetId, dashboardId }: ChatPanelProps) {
                 key={idx}
                 style={msg.role === "user" ? styles.userMsg : styles.assistantMsg}
               >
-                {msg.content}
+                {msg.role === "assistant" ? (
+                  <span dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
+                ) : (
+                  msg.content
+                )}
                 {msg.actions?.map((action, aIdx) => (
                   <div key={aIdx} style={styles.actionCard}>
                     {action.type === "explore_link" && action.explore_url && (
