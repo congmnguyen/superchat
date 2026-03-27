@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Generator
 from typing import Any
+
+from nl_explorer.chart_types import CHART_TYPE_ALIASES, CHART_TYPE_INFO, SUPPORTED_VIZ_TYPES, resolve_viz_type
 
 # Module-level import so tests can patch nl_explorer.llm_service.litellm
 try:
@@ -22,6 +25,25 @@ except ImportError:
     litellm = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+RETRYABLE_SQL_ERROR_PATTERNS = (
+    "syntax",
+    "parse",
+    "column",
+    "relation",
+    "table",
+    "invalid identifier",
+    "unknown column",
+    "not found",
+)
+RETRYABLE_CHART_ERROR_PATTERNS = (
+    "viz",
+    "metric",
+    "column",
+    "datasource",
+    "form_data",
+    "params",
+    "groupby",
+)
 
 
 def _get_config() -> dict[str, Any]:
@@ -110,6 +132,14 @@ def dispatch_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, A
     """
     from nl_explorer import chart_creator, context_builder
 
+    validation_error = _validate_tool_call(tool_name, arguments)
+    if validation_error:
+        return {
+            "role": "tool",
+            "name": tool_name,
+            "content": json.dumps(validation_error),
+        }
+
     try:
         if tool_name == "list_datasets":
             ctx = context_builder.get_user_context()
@@ -119,18 +149,30 @@ def dispatch_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, A
             result = ctx["datasets"][0] if ctx["datasets"] else {}
         elif tool_name == "run_sql":
             result = _run_sql(arguments)
+        elif tool_name == "describe_chart_types":
+            result = _describe_chart_types()
         elif tool_name == "preview_chart":
             result = chart_creator.preview_chart(
                 dataset_id=arguments["dataset_id"],
-                viz_type=arguments["viz_type"],
-                form_data=arguments.get("form_data", {}),
+                chart_type=arguments["chart_type"],
+                x_column=arguments.get("x_column"),
+                metric_column=arguments.get("metric_column"),
+                aggregate=arguments.get("aggregate", "SUM"),
+                group_by=arguments.get("group_by"),
+                columns=arguments.get("columns"),
+                time_range=arguments.get("time_range", "No filter"),
             )
         elif tool_name == "create_chart":
             result = chart_creator.create_chart(
                 slice_name=arguments["slice_name"],
-                datasource_id=arguments["datasource_id"],
-                viz_type=arguments["viz_type"],
-                params=arguments.get("params", {}),
+                dataset_id=arguments["dataset_id"],
+                chart_type=arguments["chart_type"],
+                x_column=arguments.get("x_column"),
+                metric_column=arguments.get("metric_column"),
+                aggregate=arguments.get("aggregate", "SUM"),
+                group_by=arguments.get("group_by"),
+                columns=arguments.get("columns"),
+                time_range=arguments.get("time_range", "No filter"),
             )
         elif tool_name == "create_dashboard":
             result = chart_creator.create_dashboard(
@@ -138,16 +180,39 @@ def dispatch_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, A
                 chart_ids=arguments["chart_ids"],
             )
         else:
-            result = {"error": f"Unknown tool: {tool_name}"}
+            result = _tool_error(tool_name, f"Unknown tool: {tool_name}", retryable=False)
     except Exception as exc:
         logger.exception("Tool call %s failed", tool_name)
-        result = {"error": str(exc)}
+        result = _tool_error(
+            tool_name,
+            str(exc),
+            **_classify_tool_error(tool_name, str(exc)),
+        )
+
+    result = _normalize_tool_result(tool_name, result)
 
     return {
         "role": "tool",
         "name": tool_name,
         "content": json.dumps(result),
     }
+
+
+def _describe_chart_types() -> dict[str, Any]:
+    """Return supported chart types with their required/optional parameters."""
+    chart_types = {}
+    # Build reverse alias map once
+    aliases_reversed: dict[str, list[str]] = {}
+    for alias, viz in CHART_TYPE_ALIASES.items():
+        aliases_reversed.setdefault(viz, []).append(alias)
+
+    for viz_type, info in CHART_TYPE_INFO.items():
+        entry = dict(info)
+        entry["viz_type"] = viz_type
+        entry["aliases"] = aliases_reversed.get(viz_type, [])
+        chart_types[viz_type] = entry
+
+    return {"chart_types": chart_types, "total": len(chart_types)}
 
 
 def _run_sql(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -160,7 +225,12 @@ def _run_sql(arguments: dict[str, Any]) -> dict[str, Any]:
 
     database = DatabaseDAO.find_by_id(database_id)
     if not database:
-        return {"error": f"Database {database_id} not found"}
+        return _tool_error(
+            "run_sql",
+            f"Database {database_id} not found",
+            retryable=True,
+            hint="Use the database_id from dataset context or inspect the dataset schema first.",
+        )
 
     # Append a LIMIT clause if not already present
     if "limit" not in sql.lower():
@@ -175,4 +245,188 @@ def _run_sql(arguments: dict[str, Any]) -> dict[str, Any]:
         }
     except Exception as exc:  # noqa: BLE001
         logger.exception("SQL execution failed: %s", exc)
-        return {"error": str(exc)}
+        return _tool_error("run_sql", str(exc), **_classify_tool_error("run_sql", str(exc)))
+
+
+def _normalize_tool_result(tool_name: str, result: Any) -> Any:
+    if not isinstance(result, dict) or "error" not in result:
+        return result
+
+    normalized = dict(result)
+    normalized.setdefault("tool_name", tool_name)
+    if "retryable" not in normalized or "hint" not in normalized:
+        classification = _classify_tool_error(tool_name, str(normalized["error"]))
+        normalized.setdefault("retryable", classification["retryable"])
+        normalized.setdefault("hint", classification["hint"])
+    return normalized
+
+
+def _validate_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+    if tool_name == "get_dataset_schema":
+        if not _is_positive_int(arguments.get("dataset_id")):
+            return _tool_error(
+                tool_name,
+                "dataset_id must be a positive integer.",
+                retryable=True,
+                hint="Pick a dataset_id from the dataset context or call list_datasets first.",
+                kind="validation_error",
+            )
+
+    if tool_name == "run_sql":
+        sql = str(arguments.get("sql", "")).strip()
+        if not _is_positive_int(arguments.get("database_id")):
+            return _tool_error(
+                tool_name,
+                "database_id must be a positive integer.",
+                retryable=True,
+                hint="Use the database_id shown in dataset context.",
+                kind="validation_error",
+            )
+        if not sql:
+            return _tool_error(
+                tool_name,
+                "SQL query must not be empty.",
+                retryable=True,
+                hint="Provide a read-only SELECT or WITH query.",
+                kind="validation_error",
+            )
+        if _has_multiple_sql_statements(sql):
+            return _tool_error(
+                tool_name,
+                "Only a single SQL statement is allowed.",
+                retryable=True,
+                hint="Send one SELECT or WITH query without extra statements.",
+                kind="validation_error",
+            )
+        if not _is_read_only_sql(sql):
+            return _tool_error(
+                tool_name,
+                "Only read-only SQL is allowed.",
+                retryable=True,
+                hint="Rewrite the query as a SELECT or WITH statement.",
+                kind="validation_error",
+            )
+
+    if tool_name in {"preview_chart", "create_chart"}:
+        if not _is_positive_int(arguments.get("dataset_id")):
+            return _tool_error(
+                tool_name,
+                "dataset_id must be a positive integer.",
+                retryable=True,
+                hint="Use the dataset ID from the current context.",
+                kind="validation_error",
+            )
+        chart_type = arguments.get("chart_type")
+        if not chart_type or resolve_viz_type(str(chart_type)) is None:
+            supported_aliases = ", ".join(sorted(CHART_TYPE_ALIASES.keys()))
+            supported_types = ", ".join(sorted(SUPPORTED_VIZ_TYPES))
+            return _tool_error(
+                tool_name,
+                f"Unsupported chart_type: {chart_type!r}.",
+                retryable=True,
+                hint=(
+                    f"Aliases: {supported_aliases}. "
+                    f"Canonical types: {supported_types}. "
+                    "Call describe_chart_types for details."
+                ),
+                kind="validation_error",
+            )
+        if tool_name == "create_chart" and not str(arguments.get("slice_name", "")).strip():
+            return _tool_error(
+                tool_name,
+                "slice_name must not be empty.",
+                retryable=True,
+                hint="Provide a concise human-readable chart name.",
+                kind="validation_error",
+            )
+
+    if tool_name == "create_dashboard":
+        title = str(arguments.get("title", "")).strip()
+        chart_ids = arguments.get("chart_ids")
+        if not title:
+            return _tool_error(
+                tool_name,
+                "title must not be empty.",
+                retryable=True,
+                hint="Provide a concise dashboard title.",
+                kind="validation_error",
+            )
+        if not isinstance(chart_ids, list) or not chart_ids or not all(_is_positive_int(cid) for cid in chart_ids):
+            return _tool_error(
+                tool_name,
+                "chart_ids must be a non-empty list of positive integers.",
+                retryable=True,
+                hint="Only pass saved chart IDs that already exist.",
+                kind="validation_error",
+            )
+
+    return None
+
+
+def _tool_error(
+    tool_name: str,
+    error: str,
+    retryable: bool,
+    hint: str | None = None,
+    kind: str = "execution_error",
+) -> dict[str, Any]:
+    return {
+        "tool_name": tool_name,
+        "error": error,
+        "retryable": retryable,
+        "hint": hint,
+        "kind": kind,
+    }
+
+
+def _classify_tool_error(tool_name: str, error_message: str) -> dict[str, Any]:
+    normalized = error_message.lower()
+    if "permission" in normalized or "access denied" in normalized or "not authorized" in normalized:
+        return {
+            "retryable": False,
+            "hint": "Do not retry automatically. Explain the permission issue and ask the user for another path.",
+        }
+
+    if tool_name == "run_sql" and any(pattern in normalized for pattern in RETRYABLE_SQL_ERROR_PATTERNS):
+        return {
+            "retryable": True,
+            "hint": "Correct the SQL using the available schema and retry once. If the schema is unclear, inspect the dataset first.",
+        }
+
+    if tool_name in {"preview_chart", "create_chart"} and any(
+        pattern in normalized for pattern in RETRYABLE_CHART_ERROR_PATTERNS
+    ):
+        return {
+            "retryable": True,
+            "hint": "Correct the chart config using known columns and a supported chart_type, then retry once.",
+        }
+
+    if tool_name == "create_dashboard" and "chart" in normalized:
+        return {
+            "retryable": True,
+            "hint": "Retry only if you can correct the chart IDs. Otherwise ask the user to confirm which saved charts to include.",
+        }
+
+    return {
+        "retryable": False,
+        "hint": "Do not blindly retry. Ask a clarifying question or explain the failure.",
+    }
+
+
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _has_multiple_sql_statements(sql: str) -> bool:
+    stripped = sql.strip()
+    normalized = stripped[:-1] if stripped.endswith(";") else stripped
+    return ";" in normalized
+
+
+def _is_read_only_sql(sql: str) -> bool:
+    stripped = sql.strip().lower()
+    if not stripped:
+        return False
+    if re.match(r"^(select|with)\b", stripped) is None:
+        return False
+    return not re.search(r"\b(insert|update|delete|drop|alter|truncate|create|grant|revoke)\b", stripped)

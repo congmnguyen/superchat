@@ -12,7 +12,7 @@ interface Message {
   content: string;
 }
 
-const API_BASE = "/api/v1/extensions/nl_explorer";
+const API_BASE = "/api/v1/nl_explorer";
 
 /**
  * Floating collapsible chat panel injected into Explore and Dashboard views
@@ -27,8 +27,10 @@ export default function ChatPanel({ datasetId, dashboardId }: ChatPanelProps) {
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
 
-    const userMsg: Message = { role: "user", content: input };
-    const nextConversation = [...conversation, userMsg];
+    const message = input;
+    const priorConversation = conversation;
+    const userMsg: Message = { role: "user", content: message };
+    const nextConversation = [...priorConversation, userMsg];
     setConversation(nextConversation);
     setInput("");
     setLoading(true);
@@ -39,8 +41,8 @@ export default function ChatPanel({ datasetId, dashboardId }: ChatPanelProps) {
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify({
-          message: input,
-          conversation: nextConversation,
+          message,
+          conversation: priorConversation,
           dataset_id: datasetId ?? null,
           dashboard_id: dashboardId ?? null,
           stream: false,

@@ -29,6 +29,49 @@ from nl_explorer.schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _build_chat_messages(
+    system_prompt: str,
+    conversation: list[dict[str, Any]],
+    message: str,
+) -> list[dict[str, Any]]:
+    """Build the LLM message list and tolerate clients that already appended the latest user turn."""
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    for turn in conversation:
+        messages.append({"role": turn["role"], "content": turn["content"]})
+
+    # Some clients optimistically append the current user message to the
+    # conversation before POSTing. Avoid sending the same final turn twice.
+    last_turn = conversation[-1] if conversation else None
+    if not (
+        last_turn
+        and last_turn.get("role") == "user"
+        and last_turn.get("content") == message
+    ):
+        messages.append({"role": "user", "content": message})
+
+    return messages
+
+
+def _build_retry_instruction(retryable_failures: list[dict[str, Any]]) -> str:
+    """Tell the model when it should repair a failed tool call instead of repeating it blindly."""
+    failure_lines = []
+    for failure in retryable_failures:
+        hint = failure.get("hint")
+        line = f"- {failure['tool_name']}: {failure['error']}"
+        if hint:
+            line += f" Hint: {hint}"
+        failure_lines.append(line)
+
+    joined_failures = "\n".join(failure_lines)
+    return (
+        "A tool call failed in a retryable way.\n"
+        "If the fix is clear from the existing context, issue one corrected tool call.\n"
+        "Do not repeat the same invalid arguments.\n"
+        "If required information is missing, ask a concise clarification question instead.\n"
+        f"{joined_failures}"
+    )
+
+
 class NLExplorerRestApi(BaseApi):
     """NL Explorer REST API — registered via appbuilder.add_api()."""
 
@@ -82,10 +125,11 @@ class NLExplorerRestApi(BaseApi):
 
         system_prompt = build_system_prompt(ctx, current_user=current_user_name, page_context=req.get("page_context", {}))
 
-        messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-        for turn in req.get("conversation", []):
-            messages.append({"role": turn["role"], "content": turn["content"]})
-        messages.append({"role": "user", "content": req["message"]})
+        messages = _build_chat_messages(
+            system_prompt=system_prompt,
+            conversation=req.get("conversation", []),
+            message=req["message"],
+        )
 
         if req.get("stream"):
             return self._stream_chat(messages, req)
@@ -95,6 +139,10 @@ class NLExplorerRestApi(BaseApi):
     def _sync_chat(self, messages: list[dict], req: dict) -> Response:
         """Run a synchronous (non-streaming) chat turn with tool call loop."""
         MAX_TOOL_ROUNDS = 5
+        # Collect actionable tool results (explore links, chart/dashboard URLs)
+        # across all tool call rounds so the frontend can render them.
+        all_actions: list[dict[str, Any]] = []
+        _ACTIONABLE_TYPES = {"explore_link", "chart_created", "dashboard_created"}
 
         for _ in range(MAX_TOOL_ROUNDS):
             result = llm_service.chat(messages=messages, tools=TOOLS, stream=False)
@@ -104,6 +152,7 @@ class NLExplorerRestApi(BaseApi):
             if not tool_calls:
                 break
 
+            retryable_failures: list[dict[str, Any]] = []
             # Build a properly-formatted OpenAI-style assistant message so that
             # LiteLLM can correctly translate it to Bedrock's converse format.
             messages.append({
@@ -125,10 +174,24 @@ class NLExplorerRestApi(BaseApi):
             # Bedrock receives exactly one toolResult per toolUse block.
             for tc in tool_calls:
                 raw = llm_service.dispatch_tool_call(tc["name"], tc["arguments"])
+                try:
+                    payload = json.loads(raw["content"])
+                except (TypeError, json.JSONDecodeError):
+                    payload = {}
+                if isinstance(payload, dict) and payload.get("error") and payload.get("retryable"):
+                    retryable_failures.append(payload)
+                # Collect actionable results so the frontend can render links/cards.
+                if isinstance(payload, dict) and payload.get("type") in _ACTIONABLE_TYPES:
+                    all_actions.append(payload)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
                     "content": raw["content"],
+                })
+            if retryable_failures:
+                messages.append({
+                    "role": "system",
+                    "content": _build_retry_instruction(retryable_failures),
                 })
 
         conversation_out = [
@@ -139,7 +202,7 @@ class NLExplorerRestApi(BaseApi):
 
         response_payload = {
             "message": result.get("message", ""),  # type: ignore[possibly-undefined]
-            "actions": [],
+            "actions": all_actions,
             "conversation": conversation_out,
         }
         return self.response(200, **ChatResponseSchema().dump(response_payload))
