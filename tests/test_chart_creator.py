@@ -14,8 +14,9 @@ def test_preview_chart_returns_explore_url(mock_flask_app):
     with mock_flask_app.app_context():
         result = preview_chart(
             dataset_id=7,
-            viz_type="echarts_timeseries_bar",
-            form_data={"metrics": ["count"], "groupby": ["country"]},
+            chart_type="bar",
+            x_column="country",
+            metric_column="revenue",
         )
 
     assert result["type"] == "explore_link"
@@ -41,9 +42,9 @@ def test_create_chart_calls_command(mock_get_user, mock_cmd_cls, mock_flask_app)
     with mock_flask_app.app_context():
         result = create_chart(
             slice_name="Monthly Sales",
-            datasource_id=5,
-            viz_type="table",
-            params={"columns": ["month", "revenue"]},
+            dataset_id=5,
+            chart_type="table",
+            columns=["month", "revenue"],
         )
 
     assert result["type"] == "chart_created"

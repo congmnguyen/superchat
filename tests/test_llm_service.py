@@ -65,3 +65,40 @@ def test_dispatch_list_datasets(mock_dao, mock_flask_app):
     import json
     payload = json.loads(result["content"])
     assert isinstance(payload, list)
+
+
+def test_dispatch_tool_call_rejects_non_read_only_sql(mock_flask_app):
+    """run_sql validation should reject destructive or non-read-only statements."""
+    import json
+
+    from nl_explorer.llm_service import dispatch_tool_call
+
+    with mock_flask_app.app_context():
+        result = dispatch_tool_call(
+            "run_sql",
+            {"sql": "DELETE FROM orders", "database_id": 3},
+        )
+
+    payload = json.loads(result["content"])
+    assert payload["retryable"] is True
+    assert "read-only" in payload["error"]
+
+
+def test_dispatch_tool_call_rejects_invalid_chart_type(mock_flask_app):
+    """Chart tools should validate chart_type before execution."""
+    import json
+
+    from nl_explorer.llm_service import dispatch_tool_call
+
+    with mock_flask_app.app_context():
+        result = dispatch_tool_call(
+            "preview_chart",
+            {
+                "dataset_id": 7,
+                "chart_type": "not_a_real_chart",
+            },
+        )
+
+    payload = json.loads(result["content"])
+    assert payload["retryable"] is True
+    assert "Unsupported chart_type" in payload["error"]
