@@ -7,9 +7,19 @@ interface ChatPanelProps {
   dashboardId?: number;
 }
 
+interface ChartAction {
+  type: "explore_link" | "chart_created" | "dashboard_created";
+  explore_url?: string;
+  chart_url?: string;
+  dashboard_url?: string;
+  chart_name?: string;
+  dashboard_title?: string;
+}
+
 interface Message {
   role: "user" | "assistant";
   content: string;
+  actions?: ChartAction[];
 }
 
 const API_BASE = "/api/v1/nl_explorer";
@@ -54,7 +64,11 @@ export default function ChatPanel({ datasetId, dashboardId }: ChatPanelProps) {
       const data = await res.json();
       setConversation([
         ...nextConversation,
-        { role: "assistant", content: data.message || "" },
+        {
+          role: "assistant",
+          content: data.message || "",
+          actions: data.actions || [],
+        },
       ]);
     } catch (err) {
       setConversation([
@@ -106,6 +120,25 @@ export default function ChatPanel({ datasetId, dashboardId }: ChatPanelProps) {
                 style={msg.role === "user" ? styles.userMsg : styles.assistantMsg}
               >
                 {msg.content}
+                {msg.actions?.map((action, aIdx) => (
+                  <div key={aIdx} style={styles.actionCard}>
+                    {action.type === "explore_link" && action.explore_url && (
+                      <a href={action.explore_url} target="_blank" rel="noreferrer" style={styles.link}>
+                        🔍 Open in Explore
+                      </a>
+                    )}
+                    {action.type === "chart_created" && action.chart_url && (
+                      <a href={action.chart_url} target="_blank" rel="noreferrer" style={styles.link}>
+                        📊 View Chart: {action.chart_name}
+                      </a>
+                    )}
+                    {action.type === "dashboard_created" && action.dashboard_url && (
+                      <a href={action.dashboard_url} target="_blank" rel="noreferrer" style={styles.link}>
+                        📋 View Dashboard: {action.dashboard_title}
+                      </a>
+                    )}
+                  </div>
+                ))}
               </div>
             ))}
             {loading && <div style={styles.assistantMsg}><em>Thinking…</em></div>}
@@ -207,6 +240,15 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 13,
     maxWidth: "85%",
   },
+  actionCard: {
+    marginTop: 6,
+    padding: "6px 10px",
+    background: "#fff",
+    borderRadius: 6,
+    border: "1px solid #ddd",
+    fontSize: 12,
+  },
+  link: { color: "#1677ff", textDecoration: "none" },
   inputRow: {
     display: "flex",
     gap: 6,

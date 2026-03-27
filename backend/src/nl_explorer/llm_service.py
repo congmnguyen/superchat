@@ -261,6 +261,78 @@ def _normalize_tool_result(tool_name: str, result: Any) -> Any:
     return normalized
 
 
+def _validate_chart_required_fields(
+    tool_name: str, viz_type: str, arguments: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Return a retryable validation error if chart-type-specific required fields are missing."""
+    metric_col = arguments.get("metric_column")
+    x_col = arguments.get("x_column")
+    group_by = arguments.get("group_by")
+    columns = arguments.get("columns")
+
+    # Charts that need both an axis column and a metric
+    if viz_type in ("echarts_timeseries_bar", "echarts_timeseries_line", "echarts_area", "scatter"):
+        if not x_col:
+            return _tool_error(
+                tool_name,
+                f"{viz_type} requires x_column (the category or time axis column).",
+                retryable=True,
+                hint="Inspect the dataset schema and pick a suitable column for the x axis.",
+                kind="validation_error",
+            )
+        if not metric_col:
+            return _tool_error(
+                tool_name,
+                f"{viz_type} requires metric_column (the column to aggregate).",
+                retryable=True,
+                hint="Inspect the dataset schema and pick a numeric column to aggregate.",
+                kind="validation_error",
+            )
+
+    # Pie needs at least one group_by dimension and a metric
+    if viz_type == "pie":
+        if not group_by:
+            return _tool_error(
+                tool_name,
+                "pie requires group_by (the dimension to slice by).",
+                retryable=True,
+                hint="Pass group_by as a list with at least one categorical column.",
+                kind="validation_error",
+            )
+        if not metric_col:
+            return _tool_error(
+                tool_name,
+                "pie requires metric_column (the value for each slice).",
+                retryable=True,
+                hint="Inspect the dataset schema and pick a numeric column to aggregate.",
+                kind="validation_error",
+            )
+
+    # Table needs explicit column list
+    if viz_type == "table":
+        if not columns:
+            return _tool_error(
+                tool_name,
+                "table requires columns (list of columns to display).",
+                retryable=True,
+                hint="Pass columns as a list of column names from the dataset schema.",
+                kind="validation_error",
+            )
+
+    # KPI / big number needs a metric
+    if viz_type in ("big_number_total", "big_number"):
+        if not metric_col:
+            return _tool_error(
+                tool_name,
+                f"{viz_type} requires metric_column (the KPI metric to display).",
+                retryable=True,
+                hint="Pick a numeric column to aggregate as the KPI value.",
+                kind="validation_error",
+            )
+
+    return None
+
+
 def _validate_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
     if tool_name == "get_dataset_schema":
         if not _is_positive_int(arguments.get("dataset_id")):
@@ -317,7 +389,8 @@ def _validate_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, 
                 kind="validation_error",
             )
         chart_type = arguments.get("chart_type")
-        if not chart_type or resolve_viz_type(str(chart_type)) is None:
+        viz_type = resolve_viz_type(str(chart_type)) if chart_type else None
+        if not chart_type or viz_type is None:
             supported_aliases = ", ".join(sorted(CHART_TYPE_ALIASES.keys()))
             supported_types = ", ".join(sorted(SUPPORTED_VIZ_TYPES))
             return _tool_error(
@@ -331,6 +404,11 @@ def _validate_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, 
                 ),
                 kind="validation_error",
             )
+        # Enforce chart-type-specific required fields so the LLM gets immediate
+        # feedback instead of a silent empty-metrics chart.
+        required_field_err = _validate_chart_required_fields(tool_name, viz_type, arguments)
+        if required_field_err:
+            return required_field_err
         if tool_name == "create_chart" and not str(arguments.get("slice_name", "")).strip():
             return _tool_error(
                 tool_name,
