@@ -26,8 +26,8 @@ This is the fastest way to add the plugin to a running Superset instance.
 ### 1. Clone and build
 
 ```bash
-git clone https://github.com/congmnguyen/superchat.git superset-nl-explorer
-cd superset-nl-explorer
+git clone https://github.com/congmnguyen/superchat.git
+cd superchat
 
 # Install uv if needed
 curl -Lsf https://astral.sh/uv/install.sh | sh
