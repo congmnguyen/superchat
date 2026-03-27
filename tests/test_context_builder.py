@@ -14,6 +14,8 @@ def _make_mock_dataset(id_: int, name: str, columns: list[dict]) -> MagicMock:
     ds.id = id_
     ds.table_name = name
     ds.description = None
+    ds.schema = "analytics"
+    ds.database = MagicMock(id=3, database_name="warehouse")
     col_mocks = []
     for c in columns:
         col = MagicMock()
@@ -22,6 +24,10 @@ def _make_mock_dataset(id_: int, name: str, columns: list[dict]) -> MagicMock:
         col.description = c.get("description", None)
         col_mocks.append(col)
     ds.columns = col_mocks
+    metric = MagicMock()
+    metric.metric_name = "sum__amount"
+    metric.expression = "SUM(amount)"
+    ds.metrics = [metric]
     return ds
 
 
@@ -40,7 +46,34 @@ def test_get_user_context_returns_datasets(mock_dao):
     assert len(result["datasets"]) == 2
     assert result["datasets"][0]["id"] == 1
     assert result["datasets"][0]["name"] == "orders"
+    assert result["datasets"][0]["database_id"] == 3
+    assert result["datasets"][0]["metrics"][0]["name"] == "sum__amount"
     assert any(c["name"] == "amount" for c in result["datasets"][0]["columns"])
+
+
+@patch("nl_explorer.context_builder.DatasetDAO")
+def test_get_user_context_adds_column_hints(mock_dao):
+    """Context should expose useful charting hints for the prompt."""
+    from nl_explorer.context_builder import get_user_context
+
+    mock_dao.find_all.return_value = [
+        _make_mock_dataset(
+            1,
+            "orders",
+            [
+                {"name": "order_date", "type": "TIMESTAMP"},
+                {"name": "country", "type": "VARCHAR"},
+                {"name": "amount", "type": "DECIMAL"},
+            ],
+        )
+    ]
+
+    result = get_user_context()
+
+    dataset = result["datasets"][0]
+    assert dataset["time_columns"] == ["order_date"]
+    assert "country" in dataset["dimension_columns"]
+    assert "amount" in dataset["measure_columns"]
 
 
 @patch("nl_explorer.context_builder.DatasetDAO")

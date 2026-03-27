@@ -28,19 +28,21 @@ except ImportError:
     get_user = None  # type: ignore[assignment]
 
 try:
-    from superset.charts.commands.create import CreateChartCommand
+    from superset.commands.chart.create import CreateChartCommand
 except ImportError:
-    CreateChartCommand = None  # type: ignore[assignment]
+    try:
+        from superset.charts.commands.create import CreateChartCommand  # Superset <5
+    except ImportError:
+        CreateChartCommand = None  # type: ignore[assignment]
 
 try:
-    from superset.dashboards.commands.create import CreateDashboardCommand
+    from superset.commands.dashboard.create import CreateDashboardCommand
 except ImportError:
-    CreateDashboardCommand = None  # type: ignore[assignment]
+    try:
+        from superset.dashboards.commands.create import CreateDashboardCommand  # Superset <5
+    except ImportError:
+        CreateDashboardCommand = None  # type: ignore[assignment]
 
-try:
-    from superset.daos.dashboard import DashboardDAO
-except ImportError:
-    DashboardDAO = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +256,6 @@ def create_chart(
 
     user = get_user()
     command = CreateChartCommand(
-        actor=user,
         data={
             "slice_name": slice_name,
             "datasource_id": dataset_id,
@@ -289,7 +290,6 @@ def create_dashboard(
     position_json = _build_position_json(chart_ids)
 
     command = CreateDashboardCommand(
-        actor=user,
         data={
             "dashboard_title": title,
             "slug": None,
@@ -302,10 +302,15 @@ def create_dashboard(
     )
     dashboard = command.run()
 
-    # DashboardDAO.set_dash_to_charts writes the dashboard_slices M2M table
-    # directly — this is required because Superset 5.0's position_json alone
-    # does not populate that table.
-    DashboardDAO.set_dash_to_charts(dashboard, chart_ids)
+    # Populate the dashboard_slices M2M table so charts actually appear on
+    # the dashboard. In Superset 5.x, position_json alone doesn't do this;
+    # we must link Slice objects directly via the ORM relationship.
+    from superset.extensions import db
+    from superset.models.slice import Slice
+
+    slices = db.session.query(Slice).filter(Slice.id.in_(chart_ids)).all()
+    dashboard.slices = slices
+    db.session.commit()
 
     logger.info("Created dashboard id=%s title=%s", dashboard.id, title)
 

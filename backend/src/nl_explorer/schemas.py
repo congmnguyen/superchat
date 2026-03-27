@@ -4,7 +4,7 @@ Marshmallow schemas for NL Explorer API request/response validation.
 
 from __future__ import annotations
 
-from marshmallow import fields, Schema, validate
+from marshmallow import fields, Schema, validate, INCLUDE
 
 
 class MessageSchema(Schema):
@@ -55,16 +55,26 @@ class ContextResponseSchema(Schema):
 
 
 class ActionSchema(Schema):
+    """Pass all action fields through without stripping unknown keys.
+
+    Actions carry type-specific fields (explore_url, chart_url, dashboard_url,
+    chart_name, dashboard_title, chart_id, etc.) that vary by type. Marshmallow
+    would silently drop them if they are not declared, so we use INCLUDE to
+    preserve every field the backend sets.
+    """
+
+    class Meta:
+        unknown = INCLUDE
+
     type = fields.Str(
-        metadata={"description": "Action type: create_chart, create_dashboard, run_sql, explore_link"}
+        metadata={"description": "Action type: explore_link, chart_created, dashboard_created"}
     )
-    payload = fields.Dict()
 
 
 class ChatResponseSchema(Schema):
     message = fields.Str(metadata={"description": "LLM text response"})
     actions = fields.List(
-        fields.Nested(ActionSchema),
+        fields.Dict(),
         metadata={"description": "Structured actions for the frontend to render"},
     )
     conversation = fields.List(

@@ -55,8 +55,10 @@ export default function ChatPage() {
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
 
-    const userMsg: Message = { role: "user", content: input };
-    const nextConversation = [...conversation, userMsg];
+    const message = input;
+    const priorConversation = conversation;
+    const userMsg: Message = { role: "user", content: message };
+    const nextConversation = [...priorConversation, userMsg];
     setConversation(nextConversation);
     setInput("");
     setLoading(true);
@@ -67,8 +69,8 @@ export default function ChatPage() {
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify({
-          message: input,
-          conversation: nextConversation,
+          message,
+          conversation: priorConversation,
           dataset_id: datasetId,
           page_context: pageContextRef.current,
           stream: false,
