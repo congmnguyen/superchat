@@ -301,25 +301,30 @@ def create_dashboard(
         },
     )
     dashboard = command.run()
+    dashboard_id = dashboard.id
 
     # Populate the dashboard_slices M2M table so charts actually appear on
-    # the dashboard. In Superset 5.x, position_json alone doesn't do this;
-    # we must link Slice objects directly via the ORM relationship.
+    # the dashboard. In Superset 5.x, position_json alone doesn't do this.
+    # Re-fetch the dashboard to avoid detached-instance errors after the
+    # command's internal session commit.
     from superset.extensions import db
+    from superset.models.dashboard import Dashboard
     from superset.models.slice import Slice
 
+    dash = db.session.get(Dashboard, dashboard_id)
     slices = db.session.query(Slice).filter(Slice.id.in_(chart_ids)).all()
-    dashboard.slices = slices
-    db.session.commit()
+    if dash and slices:
+        dash.slices = slices
+        db.session.commit()
 
-    logger.info("Created dashboard id=%s title=%s", dashboard.id, title)
+    logger.info("Created dashboard id=%s title=%s", dashboard_id, title)
 
     base_url = current_app.config.get("WEBDRIVER_BASEURL", "http://localhost:8088/")
     return {
         "type": "dashboard_created",
-        "dashboard_id": dashboard.id,
-        "dashboard_title": dashboard.dashboard_title,
-        "dashboard_url": f"{base_url.rstrip('/')}/superset/dashboard/{dashboard.id}/",
+        "dashboard_id": dashboard_id,
+        "dashboard_title": title,
+        "dashboard_url": f"{base_url.rstrip('/')}/superset/dashboard/{dashboard_id}/",
     }
 
 

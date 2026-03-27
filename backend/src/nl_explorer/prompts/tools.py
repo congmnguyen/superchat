@@ -229,7 +229,11 @@ TOOLS: list[dict] = [
                     "chart_ids": {
                         "type": "array",
                         "items": {"type": "integer"},
-                        "description": "List of Superset chart IDs to include.",
+                        "description": (
+                            "List of chart IDs (the chart_id values returned by "
+                            "create_chart) to include in the dashboard. "
+                            "These are NOT dataset IDs."
+                        ),
                     },
                 },
                 "required": ["title", "chart_ids"],
